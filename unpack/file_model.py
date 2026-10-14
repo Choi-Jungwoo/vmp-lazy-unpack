@@ -32,6 +32,12 @@ class FileModel:
             data = memory_image(data)
         return self.handle({"kind": "section", "name": record["name"], "data": data, "image": image})
 
+    def image_section(self, name):
+        data = self.files.get(name)
+        if data is None:
+            return None
+        return self.handle({"kind": "section", "name": name, "data": memory_image(data), "image": True})
+
     def map(self, handle, offset=0, requested_size=0):
         record = self.handles.get(handle)
         if record is None or record["kind"] != "section":

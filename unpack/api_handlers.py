@@ -4,7 +4,7 @@ from importlib import import_module
 from unicorn import UC_PROT_WRITE, UcError
 import unicorn.x86_const as ux
 
-from .arch import MODE64, read_ptr
+from .arch import MODE64, encode_ptr, read_ptr
 from .binary import encode_u32, encode_u64, read_u16, read_u32, read_u64, write_u32, write_u64
 
 
@@ -439,6 +439,68 @@ class ApiHandlers:
             result = 3221225480
         return result, details
 
+    def _nt_create_debug_object(self, symbol, rcx, rdx, r8, r9):
+        flags = r9 & 0xFFFFFFFF
+        details = dict(output_address=rcx, desired_access=rdx & 0xFFFFFFFF,
+                       object_attributes=r8, flags=flags)
+        if not self.writable_range(rcx, self.arch.ptr):
+            return 0xC0000005, details
+        if flags & ~1:
+            return 0xC000000D, details
+        if r8:
+            size = 48 if self.arch.bits == 64 else 24
+            if r8 & (self.arch.ptr - 1):
+                return 0x80000002, details
+            try:
+                attributes = bytes(self.uc.mem_read(r8, size))
+            except UcError:
+                return 0xC0000005, details
+            if read_u32(attributes) != size:
+                return 0xC000000D, details
+            if any(attributes[8 if self.arch.bits == 64 else 4:]):
+                return None, details
+        handle = self.files.handle({'kind': 'debug_object'})
+        self.write_ptr_if_mapped(rcx, handle)
+        details['handle'] = handle
+        return 0, details
+
+    def _nt_query_object(self, symbol, rcx, rdx, r8, r9):
+        information_class = rdx & 0xFFFFFFFF
+        length = r9 & 0xFFFFFFFF
+        details = dict(handle=rcx, information_class=information_class,
+                       output_address=r8, output_length=length)
+        if information_class != 2:
+            return None, details
+        if length and r8 & (self.arch.ptr - 1):
+            return 0x80000002, details
+        try:
+            returned = self.stack_slot(4)
+        except UcError:
+            return 0xC0000005, details
+        details['return_length_address'] = returned
+        if (length and not self.writable_range(r8, length)) or (returned and not self.writable_range(returned, 4)):
+            return 0xC0000005, details
+        record = self.files.handles.get(rcx)
+        if record is None:
+            return 0xC0000008, details
+        if record['kind'] != 'debug_object':
+            return None, details
+        header_size = 104 if self.arch.bits == 64 else 96
+        name = 'DebugObject'.encode('utf-16-le') + b'\0\0'
+        required = header_size + len(name)
+        if length < required:
+            self.write_u32_if_mapped(returned, required)
+            return 0xC0000004, details
+        info = bytearray(required)
+        struct.pack_into('<HH', info, 0, len(name) - 2, len(name))
+        info[self.arch.ptr:self.arch.ptr * 2] = encode_ptr(self.arch, r8 + header_size)
+        count = sum(item['kind'] == 'debug_object' for item in self.files.handles.values())
+        struct.pack_into('<II', info, self.arch.ptr * 2, count, count)
+        info[header_size:] = name
+        self.uc.mem_write(r8, bytes(info))
+        self.write_u32_if_mapped(returned, required)
+        return 0, details
+
 
     def _return_zero(self, symbol, rcx, rdx, r8, r9):
         return 0, {}
@@ -499,7 +561,24 @@ class ApiHandlers:
         return 0, details
 
     def _nt_open_section(self, symbol, rcx, rdx, r8, r9):
-        return 0xC0000022, {}
+        details = {}
+        try:
+            name = self.read_ptr_mem(r8 + self.arch.ptr * 2)
+            length = read_u16(self.uc.mem_read(name, 2))
+            buffer = self.read_ptr_mem(name + self.arch.ptr)
+            requested = bytes(self.uc.mem_read(buffer, length)).decode('utf-16-le')
+        except UcError:
+            return 0xC0000005, details
+        details['requested_section'] = requested
+        if requested.lower() != r'\knowndlls\ntdll.dll':
+            return 0xC0000022, details
+        if not self.writable_range(rcx, self.arch.ptr):
+            return 0xC0000005, details
+        handle = self.files.image_section('ntdll.dll')
+        if handle is None:
+            return 0xC0000034, details
+        self.uc.mem_write(rcx, encode_ptr(self.arch, handle))
+        return 0, details
 
     def _nt_query_information_thread(self, symbol, rcx, rdx, r8, r9):
         information_class = rdx & 0xFFFFFFFF
@@ -682,6 +761,8 @@ class ApiHandlers:
         'ntqueryvirtualmemory': (_nt_query_virtual_memory, 6),
         'ntsetinformationthread': (_nt_set_information_thread, 4),
         'ntclose': (_nt_close, 1),
+        'ntcreatedebugobject': (_nt_create_debug_object, 4),
+        'ntqueryobject': (_nt_query_object, 5),
         'ntdelayexecution': (_return_zero, 2),
         'ntopenfile': (_nt_open_file, 6),
         'ntraiseharderror': (_nt_raise_hard_error, 6),

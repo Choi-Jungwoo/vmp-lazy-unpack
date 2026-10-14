@@ -157,6 +157,13 @@ def build_emu_module_blob(module_name, symbols, module_base, arch=MODE64):
             raise ValueError(f"export not in captured catalog {module_name}!{symbol}")
         assignments[symbol] = ordinal - 1
     used_indexes = set(assignments.values())
+    stub_indexes = {index: index for index in used_indexes}
+    if module_name == 'ntdll.dll' and arch.bits == 64:
+        with pefile.PE(data=require_catalog().ntdll_bytes, fast_load=True) as ntdll:
+            ntdll.parse_data_directories(directories=[0])
+            addresses = {item.ordinal - 1: item.address for item in ntdll.DIRECTORY_ENTRY_EXPORT.symbols}
+        ordered = {address: index for index, address in enumerate(sorted({addresses[index] for index in used_indexes}))}
+        stub_indexes = {index: ordered[addresses[index]] for index in used_indexes}
     function_count = max(used_indexes, default=0) + 1
     export_rva = 0x1000
     functions_rva = 0x1100
@@ -194,8 +201,9 @@ def build_emu_module_blob(module_name, symbols, module_base, arch=MODE64):
     cursor += len(module_name_bytes)
 
     for index in used_indexes:
-        write_u32(blob, functions_rva + index * 4, stubs_rva + index * 0x10)
-        blob[stubs_rva + index * 0x10:stubs_rva + index * 0x10 + 3] = b"\x31\xC0\xC3"
+        stub = stubs_rva + stub_indexes[index] * 0x10
+        write_u32(blob, functions_rva + index * 4, stub)
+        blob[stub:stub + 3] = b"\x31\xC0\xC3"
 
     for name_index, symbol in enumerate(named):
         encoded = symbol.encode("ascii") + b"\x00"
@@ -213,7 +221,7 @@ def build_emu_module_blob(module_name, symbols, module_base, arch=MODE64):
         for symbol, function_index in assignments.items():
             if not symbol.lower().startswith(("nt", "zw")):
                 continue
-            stub = stubs_rva + function_index * 0x10
+            stub = stubs_rva + stub_indexes[function_index] * 0x10
             if symbol not in syscalls:
                 continue
             syscall_number = syscalls[symbol]
@@ -235,7 +243,7 @@ def build_emu_module_blob(module_name, symbols, module_base, arch=MODE64):
                        AddressOfFunctions=functions_rva,
                        AddressOfNames=names_rva,
                        AddressOfNameOrdinals=ordinals_rva)
-    return bytes(blob), assignments, stubs_rva
+    return bytes(blob), {symbol: stub_indexes[index] for symbol, index in assignments.items()}, stubs_rva
 
 
 def map_emu_windows_modules(uc, import_slots, arch=MODE64):
@@ -542,6 +550,7 @@ def map_synthetic_process_state(uc, module_bases, process_image=None, arch=MODE6
     uc.mem_map(STACK_BASE, STACK_SIZE, UC_PROT_ALL)
     uc.mem_map(KUSER_SHARED_DATA_BASE, PAGE_SIZE, UC_PROT_ALL)
     uc.mem_write(KUSER_SHARED_DATA_BASE + 0x260, encode_u32(windows_build))
+    uc.mem_write(KUSER_SHARED_DATA_BASE + 0x26A, encode_u16(9))
     uc.mem_write(KUSER_SHARED_DATA_BASE + 0x26C, encode_u32(version["major"]))
     uc.mem_write(KUSER_SHARED_DATA_BASE + 0x270, encode_u32(version["minor"]))
     if process_image is None:
