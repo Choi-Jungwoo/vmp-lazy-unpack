@@ -430,6 +430,12 @@ class ApiHandlers:
             result = 0
         return result, details
 
+    def _close_handle(self, symbol, rcx, rdx, r8, r9):
+        status, details = self._nt_close(symbol, rcx, rdx, r8, r9)
+        if status:
+            self.last_error = 6
+        return int(status == 0), details
+
     def _nt_close(self, symbol, rcx, rdx, r8, r9):
         details = dict(handle=rcx, known_handle=rcx in self.files.handles)
         if details['known_handle']:
@@ -752,7 +758,7 @@ class ApiHandlers:
         'heapfree': (_return_success, 3),
         'virtualfree': (_return_success, 3),
         'freelibrary': (_return_success, 1),
-        'closehandle': (_return_success, 1),
+        'closehandle': (_close_handle, 1),
         'virtualalloc': (_virtual_alloc, 4),
         'virtualprotect': (_virtual_protect, 4),
         'ntprotectvirtualmemory': (_nt_protect_virtual_memory, 5),

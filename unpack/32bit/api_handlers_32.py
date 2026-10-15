@@ -153,12 +153,6 @@ class ApiHandlers32(MemoryHandlers32, FileHandlers32, ThreadHandlers32, ProcessH
         self.uc.mem_write(output, descriptor + encoded + b'\0\0')
         return 0
 
-    def _close_handle(self, symbol, rcx, rdx, r8, r9):
-        status, details = self._nt_close(symbol, rcx, rdx, r8, r9)
-        if status:
-            self.last_error = 6
-        return int(status == 0), details
-
     def firmware_buffer(self, data, output, capacity):
         required = len(data)
         if capacity < required:
@@ -200,7 +194,6 @@ class ApiHandlers32(MemoryHandlers32, FileHandlers32, ThreadHandlers32, ProcessH
         'virtualalloc': (MemoryHandlers32._virtual_alloc, 4),
         'virtualfree': (MemoryHandlers32._virtual_free, 3),
         'virtualprotect': (MemoryHandlers32._virtual_protect, 4),
-        'closehandle': (_close_handle, 1),
         'ntsetinformationprocess': (_nt_set_information_process, 4),
         'ntquerysysteminformation': (_nt_query_system_information, 4),
         'ntqueryinformationprocess': (ProcessHandlers32._nt_query_information_process, 5),
